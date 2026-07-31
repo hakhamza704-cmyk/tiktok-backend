@@ -1,0 +1,97 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import yt_dlp
+import re
+
+app = Flask(__name__)
+CORS(app)
+
+@app.route('/')
+def home():
+    return jsonify({"message": "TikTok Ultimate Detection Engine is Online!"})
+
+@app.route('/download', methods=['POST'])
+def ultimate_check_and_download():
+    data = request.get_json()
+    video_url = data.get('url') if data else None
+
+    if not video_url:
+        return jsonify({"error": "الرجاء إدخال رابط الفيديو!"}), 400
+
+    try:
+        ydl_opts = {
+            'format': 'best',
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            
+            title = info.get('title', '')
+            uploader = info.get('uploader', '')
+            uploader_id = info.get('uploader_id', '')
+            artist = info.get('artist', '')
+            description = info.get('description', '')
+            download_link = info.get('url', '')
+            width = info.get('width', 0)
+            height = info.get('height', 0)
+            fps = info.get('fps', 0)
+
+            repost_score = 0
+            reasons = []
+
+            # 1. كشف الحقوق والمنقول في النصوص (وزن 35%)
+            credit_keywords = ['ib:', 'cr:', 'credit:', 'repost', 'remix', 'reuploaded', 'حقوق', 'منقول', 'اعادة نشر', 'سارق', 'مسروق', 'منقوله']
+            combined_text = (title + " " + description).lower()
+            for kw in credit_keywords:
+                if kw in combined_text:
+                    repost_score += 35
+                    reasons.append(f"يوجد إقرار بنقل المحتوى في الوصف ({kw})")
+                    break
+
+            # 2. فحص الصوت وتحديد المالك الأصلي (وزن 40%)
+            original_creator = uploader
+            if artist and uploader_id:
+                clean_artist = re.sub(r'[^a-zA-Z0-9]', '', artist).lower()
+                clean_uploader = re.sub(r'[^a-zA-Z0-9]', '', uploader_id).lower()
+                
+                if clean_artist and clean_uploader and clean_artist not in clean_uploader and clean_uploader not in clean_artist:
+                    repost_score += 40
+                    original_creator = artist
+                    reasons.append(f"الصوت مأخوذ من صاحب المحتوى الأصلي: (@{artist})")
+
+            # 3. فحص أبعاد الصورة ونزع العلامة المائية / التشويش (وزن 15%)
+            if width and height:
+                aspect_ratio = height / width
+                # الأبعاد غير القياسية تشير عادة إلى قص الحواف لإخفاء العلامة المائية أو إضافة ضباب (Blur)
+                if aspect_ratio < 1.6 or aspect_ratio > 1.9:
+                    repost_score += 15
+                    reasons.append("أبعاد الفيديو معدلة (احتمال قص العلامة المائية أو إضافة إطار تشويش)")
+
+            # 4. فحص جودة ومعدل الإطارات (FPS/Resolution) (وزن 10%)
+            if fps and fps < 24:
+                repost_score += 10
+                reasons.append("انخفاض معدل إطارات الفيديو (نتيجة تسجيل الشاشة أو إعادة الضغط)")
+
+            is_stolen = repost_score >= 40
+            status_message = "⚠️ هذا الفيديو مسروق / مُعاد نشره بأساليب تعديل مختلف!" if is_stolen else "✅ هذا الفيديو يبدو أصلياً ومستقلاً!"
+
+            return jsonify({
+                "success": True,
+                "title": title,
+                "uploader": uploader,
+                "original_creator": original_creator,
+                "is_stolen": is_stolen,
+                "repost_score": min(repost_score, 100),
+                "status_message": status_message,
+                "reasons": reasons,
+                "original_audio_author": artist if artist else "صوت الحساب الأصلي",
+                "download_url": download_link
+            })
+
+    except Exception as e:
+        return jsonify({"error": f"تعذر تحليل الفيديو: {str(e)}"}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
