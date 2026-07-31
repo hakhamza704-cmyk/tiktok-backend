@@ -1,0 +1,88 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import yt_dlp
+import re
+
+app = Flask(__name__)
+CORS(app)
+
+@app.route('/')
+def home():
+    return jsonify({"message": "TikTok Accurate Detection Engine is Online!"})
+
+@app.route('/download', methods=['POST'])
+def check_and_download():
+    data = request.get_json()
+    video_url = data.get('url') if data else None
+
+    if not video_url:
+        return jsonify({"error": "الرجاء إدخال رابط الفيديو!"}), 400
+
+    try:
+        ydl_opts = {
+            'format': 'best',
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            
+            title = info.get('title', '')
+            uploader = info.get('uploader', 'غير معروف')
+            uploader_id = info.get('uploader_id', '')
+            track = info.get('track', '')
+            artist = info.get('artist', '')
+            description = info.get('description', '')
+            download_link = info.get('url', '')
+
+            repost_score = 0
+            reasons = []
+
+            # 1. فحص الصوت والناشر الحقيقي
+            sound_owner = artist if artist else (track if track else "صوت أصلي")
+            
+            clean_uploader = re.sub(r'[^a-zA-Z0-9]', '', uploader_id).lower()
+            clean_sound = re.sub(r'[^a-zA-Z0-9]', '', sound_owner).lower()
+
+            # إذا كان الصوت يحتوي اسم حساب مختلف تماماً عن الناشر
+            if clean_sound and clean_uploader and clean_sound not in clean_uploader and clean_uploader not in clean_sound:
+                # التأكد من أنه ليس مجرد كلمة "original sound"
+                if "original" not in sound_owner.lower() and "صوت" not in sound_owner.lower():
+                    repost_score += 65
+                    reasons.append(f"الصوت المستخدم مسجل باسم حساب آخر: ({sound_owner})")
+
+            # 2. فحص كلمات النقل والحقوق في الوصف والعنوان
+            credit_keywords = ['ib:', 'cr:', 'credit:', 'repost', 'remix', 'reuploaded', 'حقوق', 'منقول', 'اعادة نشر', 'سارق', 'مسروق']
+            combined_text = (title + " " + description).lower()
+            for kw in credit_keywords:
+                if kw in combined_text:
+                    repost_score += 35
+                    reasons.append(f"الوصف يحتوي على كلمة تشير للنقل ({kw})")
+                    break
+
+            # 3. فحص طول الوصف
+            if len(description.strip()) < 3:
+                repost_score += 10
+                reasons.append("الوصف فارغ/قصير جداً")
+
+            is_stolen = repost_score >= 45
+            status_message = "⚠️ هذا الفيديو مسروق أو يُعاد نشره بحقوق لغير صاحبه!" if is_stolen else "✅ هذا الفيديو يبدو أصلياً ومستقلاً!"
+
+            return jsonify({
+                "success": True,
+                "title": title,
+                "uploader": f"@{uploader_id}" if uploader_id else uploader,
+                "is_stolen": is_stolen,
+                "repost_score": min(repost_score, 100),
+                "status_message": status_message,
+                "reasons": reasons,
+                "original_audio_author": sound_owner,
+                "download_url": download_link
+            })
+
+    except Exception as e:
+        return jsonify({"error": f"تعذر تحليل الفيديو: {str(e)}"}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
